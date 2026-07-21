@@ -1,0 +1,18 @@
+[package]
+name = "l4dder-worker"
+version = "0.1.0"
+edition = "2021"
+description = "Lightweight distributed scrape worker for the L4DDER (TR4KER unofficial ladder)"
+license = "MIT"
+
+[dependencies]
+ureq = { version = "2.10", default-features = false, features = ["tls", "json", "gzip"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[profile.release]
+opt-level = "z"     # optimise pour la taille
+lto = true
+codegen-units = 1
+panic = "abort"     # pas de unwinding -> binaire plus petit
+strip = true
