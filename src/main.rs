@@ -62,6 +62,11 @@ impl Cfg {
     fn has_creds(&self) -> bool { !self.tr_user.is_empty() && !self.tr_pass.is_empty() }
 }
 
+// résultat d'un GET : Ok(json), Gone (404 = profil inexistant), Fail (transitoire)
+enum Fetch { Ok(serde_json::Value), Gone, Fail }
+// résultat d'un scrape user : Ok(profil), Gone (404 -> tombstone), Fail (à re-tenter)
+enum ScrapeOut { Ok(Sample), Gone, Fail }
+
 // ------------------------- tr4ker session -------------------------
 // Auth cookie-based. On capture Set-Cookie: TR4KER_session au login et on le
 // réinjecte manuellement (pas de cookie-jar -> plus léger). Re-login sur 401.
@@ -112,12 +117,20 @@ impl<'a> Tr4ker<'a> {
                 log("[auth] login 200 mais pas de cookie");
                 false
             }
+            // login throttlé -> backoff (ne PAS marteler, ça aggrave le rate-limit)
+            Err(ureq::Error::Status(429, _)) => {
+                self.consec429 += 1;
+                let back = (30.0 * self.consec429 as f64).min(300.0);
+                self.cooldown_until = now() + back;
+                log(&format!("[auth] 429 sur login, cooldown {:.0}s", back));
+                false
+            }
             Err(e) => { log(&format!("[auth] fail {}", e)); false }
         }
     }
 
-    // GET authentifié avec pacing AIMD + gestion 429/401. None = échec (à re-tenter).
-    fn get(&mut self, path: &str) -> Option<serde_json::Value> {
+    // GET authentifié avec pacing AIMD + gestion 429/404/401.
+    fn get(&mut self, path: &str) -> Fetch {
         if now() < self.cooldown_until { sleep(self.cooldown_until - now()); }
         let gap = 1.0 / self.rps.max(0.2);
         let wait = self.last_req + gap - now();
@@ -127,12 +140,12 @@ impl<'a> Tr4ker<'a> {
         if self.cookie.is_none() {
             // pas de cookie -> tenter un login si on a des identifiants
             if self.cfg.has_creds() {
-                if !self.login() { return None; }
+                if !self.login() { return Fetch::Fail; }
             } else {
                 log("[auth] cookie expiré et aucun identifiant fourni — fournir TR4KER_COOKIE frais \
                      ou TR4KER_USER/PASS. Pause 5 min.");
                 self.cooldown_until = now() + 300.0;
-                return None;
+                return Fetch::Fail;
             }
         }
         let cookie = self.cookie.clone().unwrap();
@@ -145,7 +158,7 @@ impl<'a> Tr4ker<'a> {
                 if self.rps < self.target {
                     self.rps = (self.rps + 0.15).min(self.target);
                 }
-                r.into_json().ok()
+                match r.into_json() { Ok(v) => Fetch::Ok(v), Err(_) => Fetch::Fail }
             }
             Err(ureq::Error::Status(429, _)) => {
                 self.consec429 += 1;
@@ -153,20 +166,29 @@ impl<'a> Tr4ker<'a> {
                 self.cooldown_until = now() + back;
                 if self.consec429 >= 2 { self.rps = (self.rps * 0.8).max(0.3); }
                 log(&format!("[429] x{} cooldown {:.0}s rps {:.2}", self.consec429, back, self.rps));
-                None
+                Fetch::Fail
             }
-            Err(ureq::Error::Status(401, _)) => { self.cookie = None; None }
-            Err(ureq::Error::Status(_, _)) => None,
-            Err(e) => { log(&format!("[req] {}", e)); None }
+            Err(ureq::Error::Status(404, _)) => Fetch::Gone,
+            Err(ureq::Error::Status(401, _)) => { self.cookie = None; Fetch::Fail }
+            Err(ureq::Error::Status(_, _)) => Fetch::Fail,
+            Err(e) => { log(&format!("[req] {}", e)); Fetch::Fail }
         }
     }
 
-    // Scrape complet d'un user : profil + tier upload (badges). None si le profil échoue.
-    fn scrape_user(&mut self, name: &str) -> Option<Sample> {
-        let d = self.get(&format!("/api/users/{}", enc(name)))?;
-        let id = d.get("id").and_then(|v| v.as_i64())?;
+    // Scrape complet d'un user : profil + tier upload (badges).
+    // Gone = 404 (profil inexistant, à tombstone) ; Fail = transitoire (re-tenter).
+    fn scrape_user(&mut self, name: &str) -> ScrapeOut {
+        let d = match self.get(&format!("/api/users/{}", enc(name))) {
+            Fetch::Ok(d) => d,
+            Fetch::Gone => return ScrapeOut::Gone,
+            Fetch::Fail => return ScrapeOut::Fail,
+        };
+        let id = match d.get("id").and_then(|v| v.as_i64()) {
+            Some(i) => i,
+            None => return ScrapeOut::Gone,   // 200 sans id -> traiter comme introuvable
+        };
         let tier = self.badge_tier(name); // best-effort, peut être None
-        Some(Sample {
+        ScrapeOut::Ok(Sample {
             username: name.to_string(),
             id,
             role: sval(&d, "role"),
@@ -182,7 +204,10 @@ impl<'a> Tr4ker<'a> {
     }
 
     fn badge_tier(&mut self, name: &str) -> Option<i64> {
-        let d = self.get(&format!("/api/users/{}/badges", enc(name)))?;
+        let d = match self.get(&format!("/api/users/{}/badges", enc(name))) {
+            Fetch::Ok(d) => d,
+            _ => return None,
+        };
         let items = if d.is_array() { d.as_array().cloned().unwrap_or_default() }
                     else { d.get("badges").or_else(|| d.get("data"))
                             .and_then(|v| v.as_array()).cloned().unwrap_or_default() };
@@ -252,11 +277,11 @@ fn lease(cfg: &Cfg, agent: &ureq::Agent) -> Option<Lease> {
 }
 
 fn submit(cfg: &Cfg, agent: &ureq::Agent, lease_id: &str,
-          results: &[Sample], failed: &[String]) -> bool {
+          results: &[Sample], failed: &[String], gone: &[String]) -> bool {
     let url = format!("{}/api/worker/submit", cfg.ladder);
     match agent.post(&url).send_json(json!({
         "token": cfg.token, "lease_id": lease_id,
-        "results": results, "failed": failed
+        "results": results, "failed": failed, "gone": gone
     })) {
         Ok(_) => true,
         Err(e) => { log(&format!("[submit] {}", e)); false }
@@ -299,14 +324,16 @@ fn main() {
 
         let mut results: Vec<Sample> = Vec::new();
         let mut failed: Vec<String> = Vec::new();
+        let mut gone: Vec<String> = Vec::new();
         for name in &l.items {
             match tr.scrape_user(name) {
-                Some(s) => results.push(s),
-                None => failed.push(name.clone()),
+                ScrapeOut::Ok(s) => results.push(s),
+                ScrapeOut::Gone => gone.push(name.clone()),
+                ScrapeOut::Fail => failed.push(name.clone()),
             }
         }
-        let ok = submit(&cfg, &ladder_agent, &l.lease_id, &results, &failed);
-        log(&format!("submit lease={} ok={} scraped={} failed={}",
-                     &l.lease_id[..l.lease_id.len().min(8)], ok, results.len(), failed.len()));
+        let ok = submit(&cfg, &ladder_agent, &l.lease_id, &results, &failed, &gone);
+        log(&format!("submit lease={} ok={} scraped={} gone={} failed={}",
+                     &l.lease_id[..l.lease_id.len().min(8)], ok, results.len(), gone.len(), failed.len()));
     }
 }

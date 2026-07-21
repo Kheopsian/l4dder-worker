@@ -50,10 +50,20 @@ cookie tout seul). (B) évite de stocker ton mot de passe mais expire au bout de
 
 ## Lancer
 
-### Docker (recommandé)
+### Docker depuis l'image publiée (le plus simple — aucun build)
 
 ```bash
 cp .env.example .env      # puis édite tes valeurs
+docker run -d --name l4dder-worker --restart unless-stopped --env-file .env \
+  ghcr.io/kheopsian/l4dder-worker:latest
+```
+
+L'image est publiée automatiquement (amd64 + arm64, tourne aussi sur un Pi).
+
+### Docker en buildant toi-même
+
+```bash
+cp .env.example .env
 docker build -t l4dder-worker .
 docker run -d --name l4dder-worker --restart unless-stopped --env-file .env l4dder-worker
 ```
