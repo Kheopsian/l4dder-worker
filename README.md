@@ -19,8 +19,8 @@ maître du calcul (seedtime, composite) — le worker est sans état et intercha
   │  L4DDER    │ ─────────────────────────────► │   worker    │
   │  (serveur) │ ◄───────────────────────────── │ (chez toi)  │
   └────────────┘   3. submit (profils bruts)    └──────┬──────┘
-                                                        │ 2. scrape depuis TA propre IP
-                                                        ▼
+                                                       │ 2. scrape depuis TA propre IP
+                                                       ▼
                                                    ┌─────────┐
                                                    │ TR4KER  │
                                                    └─────────┘
