@@ -9,6 +9,8 @@
 //
 // Config = variables d'environnement (voir .env.example).
 
+#![windows_subsystem = "windows"]
+
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use std::time::{SystemTime, UNIX_EPOCH};
