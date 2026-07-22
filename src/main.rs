@@ -9,7 +9,7 @@
 //
 // Config = variables d'environnement (voir .env.example).
 
-#![windows_subsystem = "windows"]
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -22,7 +22,16 @@ fn now() -> f64 { SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs_
 fn env(k: &str) -> String { std::env::var(k).unwrap_or_default() }
 fn env_or(k: &str, d: &str) -> String { let v = env(k); if v.is_empty() { d.to_string() } else { v } }
 fn sleep(secs: f64) { std::thread::sleep(std::time::Duration::from_secs_f64(secs.max(0.0))); }
-fn log(msg: &str) { println!("[{:.0}] {}", now(), msg); }
+fn log(msg: &str) {
+    use std::io::Write;
+    let line = format!("[{:.0}] {}", now(), msg);
+    let _ = writeln!(std::io::stdout(), "{}", line);
+    if let Ok(p) = std::env::var("WORKER_LOG") {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&p) {
+            let _ = writeln!(f, "{}", line);
+        }
+    }
+}
 
 // ----------------------------- config -----------------------------
 #[derive(Clone)]
