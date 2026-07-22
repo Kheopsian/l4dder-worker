@@ -9,7 +9,7 @@ concernés sur TR4KER, et renvoie les données brutes. Le serveur central reste 
 maître du calcul (seedtime, composite) — le worker est sans état et interchangeable.
 
 - **Image Docker : ~2 Mo** (binaire Rust statique dans `scratch`)
-- **RAM : ~3-5 Mo** au repos
+- **RAM : <1 Mo** au repos (mesuré)
 - Tourne aussi **sans Docker** (binaire unique)
 
 ## Comment ça marche
@@ -41,6 +41,7 @@ Toute la config passe par variables d'environnement (voir [`.env.example`](.env.
 | `TR4KER_USER` + `TR4KER_PASS` | (A) | tes identifiants TR4KER — re-login auto tous les ~30 j |
 | `TR4KER_COOKIE` | (B) | ou colle ton cookie `TR4KER_session` — à renouveler à la main (~30 j) |
 | `BATCH` | ⬜ | nb de users par lease (défaut 150) |
+| `WORKER_LOG` | ⬜ | chemin d'un fichier où écrire les logs (indispensable en mode windowless Windows, voir plus bas) |
 
 **Auth TR4KER : choisis (A) OU (B).** (A) est recommandé (le worker régénère son
 cookie tout seul). (B) évite de stocker ton mot de passe mais expire au bout de ~30 j.
@@ -74,6 +75,29 @@ docker run -d --name l4dder-worker --restart unless-stopped --env-file .env l4dd
 cargo build --release
 LADDER_URL=... WORKER_TOKEN=... TR4KER_USER=... TR4KER_PASS=... \
   ./target/release/l4dder-worker
+```
+
+### Windows — tourner en arrière-plan (sans fenêtre)
+
+Le binaire **release** est compilé sans console (`windows_subsystem`) → il tourne en
+tâche de fond, aucune fenêtre. Le build **debug** garde une console (pratique pour vérifier).
+
+| Build | Fenêtre | Logs |
+|---|---|---|
+| `cargo run` (debug) | console visible | dans la console |
+| `cargo build --release` | aucune (windowless) | via `WORKER_LOG` |
+
+En release il n'y a **plus de console**, donc pour vérifier que ça tourne, définis
+`WORKER_LOG` : le worker écrit alors ses logs dans ce fichier.
+
+```powershell
+$env:LADDER_URL="https://ladder.kheopsian.com"
+$env:WORKER_TOKEN="<ton token>"
+$env:TR4KER_USER="<compte>"; $env:TR4KER_PASS="<mdp>"
+$env:WORKER_LOG="C:\l4dder.log"
+.\target\release\l4dder-worker.exe
+# suivre les logs en direct :
+Get-Content C:\l4dder.log -Wait -Tail 20
 ```
 
 ## Confiance & données
